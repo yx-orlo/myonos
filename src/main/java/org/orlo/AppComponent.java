@@ -20,6 +20,8 @@ import com.eclipsesource.json.JsonObject;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.onosproject.net.Device;
+import org.onosproject.net.device.PortStatistics;
 import org.onosproject.net.edge.EdgePortService;
 import org.onosproject.net.statistic.PortStatisticsService;
 import org.osgi.service.component.annotations.Activate;
@@ -193,7 +195,9 @@ public class AppComponent {
         //安装IP到table2的流表项
         installIP2Table2();
         //每隔5s上传一次流量矩阵
-        storeMatrixMission();
+//        storeMatrixMission();
+        //每隔1s统计一次接入端口流数据
+        storeFlowRateMission();
     }
     /**
      * 设置switch间port的信息.
@@ -606,7 +610,27 @@ public class AppComponent {
     }
 
     /**
-     *  每隔5s获取一次流量矩阵.
+     * 每隔1s获取一次流入口速率
+     * @return
+     */
+    public String getFlowRate() {
+      /*  Set<String> keySet = testSwMap.keySet();
+        JsonObject matrixRes = new JsonObject();
+        for(String key : keySet) {
+            DeviceId deviceId = testSwMap.get(key);
+            PortStatistics deltaStatisticsForPort = deviceService.getDeltaStatisticsForPort(deviceId, PortNumber.portNumber("1"));
+            long l = deltaStatisticsForPort.bytesReceived();
+            matrixRes.set(key, l);
+        }
+        return matrixRes.toString();*/
+        DeviceId deviceId = testSwMap.get("0");
+        PortStatistics deltaStatisticsForPort = deviceService.getDeltaStatisticsForPort(deviceId, PortNumber.portNumber("1"));
+        long l = deltaStatisticsForPort.bytesReceived();
+        return String.valueOf(l);
+    }
+
+    /**
+     *  每隔1s获取一次流量矩阵.
      * @return
      */
     public String getMatrix() {
@@ -889,14 +913,16 @@ public class AppComponent {
      * @param interval
      * @param count  为-1时,代表无限循环.
      */
-    private void optiRouterMission(int interval, int count) {
+    private void optiRouterMission(int delay, int interval, int count) {
         timer.schedule(new TimerTask() {
             @Override
             public void run() {
                 // 获取优化前的链路状况
 //                String edgeSpeed = getEdgeSpeed();
-                String edgeSpeed = getTop3EdgeRate();
+                String top3EdgeRate = getTop3EdgeRate();
+                String edgeSpeed = getMaxEdgeRate();
                 writeToFile(edgeSpeed, "/home/something.txt");
+                writeToFile(top3EdgeRate, "/home/top3rate.txt");
                 log.info(edgeSpeed);
                 //清空优化流表
                 emptyOptiFlow();
@@ -911,7 +937,7 @@ public class AppComponent {
                     cancel();
                 }
             }
-        }, 100, 1000 * interval);
+        }, delay * 1000, 1000 * interval);
     }
 
     /**
@@ -929,6 +955,25 @@ public class AppComponent {
                 } catch (InterruptedException e) {
                     e.printStackTrace();
                 }
+                cancel();
+            }
+        }, 1000 * interval);
+    }
+
+    /**
+     * 定时任务，模拟链接断掉后，请求新的路由.
+     * @param interval
+     */
+    private void DisConnectionMission(int interval) {
+        timer.schedule(new TimerTask() {
+            @Override
+            public void run() {
+                String top3EdgeRate = getTop3EdgeRate();
+                String edgeSpeed = getMaxEdgeRate();
+                writeToFile(edgeSpeed, "/home/something.txt");
+                writeToFile(top3EdgeRate, "/home/top3rate.txt");
+                emptyOptiFlow();
+                executorService.submit(new ConnectionDownThread());
                 cancel();
             }
         }, 1000 * interval);
@@ -1021,6 +1066,19 @@ public class AppComponent {
         }
 
     }
+
+    /**
+     * 定时任务用于每1s存储一次输入到网络中的流
+     */
+    private void storeFlowRateMission() {
+        timer.schedule(new TimerTask() {
+            @Override
+            public void run() {
+                String flowRateStatics = getFlowRate();
+                writeToFile(flowRateStatics, "/home/FlowStatics.txt");
+            }
+        }, 100, 1000);
+    }
     /**
      * 定时任务,用于每5s存储一次流量矩阵.
      *
@@ -1032,7 +1090,7 @@ public class AppComponent {
                 String matrix = getMatrix();
                 writeToFile(matrix, "/home/Matrix.txt");
             }
-        }, 100, 1000 * 5);
+        }, 100, 1000);
     }
     /**
      * 把信息输出到文件.
@@ -1054,6 +1112,32 @@ public class AppComponent {
 //            log.info("finished write to file");
         } catch (IOException e) {
             log.error(e.toString());
+        }
+    }
+
+    /**
+     * 获取最大链路利用率.
+     * @return
+     */
+    private String getMaxEdgeRate() {
+        try {
+            Topology topology = topologyService.currentTopology();
+            TopologyGraph graph = topologyService.getGraph(topology);
+            Set<TopologyEdge> edges = graph.getEdges();
+            ArrayList<Long> longs = new ArrayList<>();
+            for (TopologyEdge edge : edges) {
+                ConnectPoint src = edge.link().src();
+                long rate = portStatisticsService.load(src).rate();
+                longs.add(rate);
+            }
+            Collections.sort(longs);
+            int size = longs.size();
+            Long long1 = longs.get(size - 1);
+            Double out1 = Double.parseDouble(String.valueOf(long1 * 8 / 10000)) * 0.01;
+            return "Max:" + out1.toString() + "***";
+        } catch (Exception e) {
+            log.info(e.toString());
+            return "-------->>>>>>>" + e.toString();
         }
     }
 
@@ -1085,7 +1169,7 @@ public class AppComponent {
             Double out1 = Double.parseDouble(String.valueOf(long1 * 8 / 10000)) * 0.01;
             Double out2 = Double.parseDouble(String.valueOf(long2 * 8 / 10000)) * 0.01;
             Double out3 = Double.parseDouble(String.valueOf(long3 * 8 / 10000)) * 0.01;
-            return "\nrate1:" + out1.toString() + "  rate2:" +
+            return "rate1:" + out1.toString() + "  rate2:" +
                     out2.toString() + "  rate3:" + out3.toString() + "***";
         } catch (Exception e) {
             log.info(e.toString());
@@ -1275,17 +1359,21 @@ public  class RoutingFlowThread implements Runnable {
             throughStrInstallFlow(routingInfo);
             log.info("-------------------optimizing routing flow installed---------------------------");
             try {
-                Thread.sleep(3000);
+                Thread.sleep(6000);
             } catch (InterruptedException e) {
                 e.printStackTrace();
             }
             if (edgeArrayList.size() != 0) {
                 for (TopologyEdge edge : edgeArrayList) {
                     String rateByEdge = getRateByEdge(edge);
-                    writeToFile(rateByEdge, "/home/something.txt");
+                    writeToFile(rateByEdge, "/home/top3rate.txt");
                 }
             }
+            writeToFile("\n\n", "/home/top3rate.txt");
             edgeArrayList.clear();
+            String maxEdgeRate = getMaxEdgeRate();
+            writeToFile(maxEdgeRate, "/home/something.txt");
+            writeToFile("\n\n", "/home/something.txt");
 //            String edgeSpeed = getEdgeSpeed();
 //            writeToFile(edgeSpeed, "/home/something.txt");
 //            log.info(edgeSpeed);
@@ -1378,6 +1466,59 @@ public class DefaultFlowThread implements Runnable {
     }
 }
 
+    /**
+     * 链路断掉处理的线程.
+     */
+    public class ConnectionDownThread implements Runnable {
+        @Override
+        public void run() {
+            try {
+                log.info("--------------connection down and request--------------");
+                SocketChannel socketChannel = SocketChannel.open();
+                socketChannel.connect(new InetSocketAddress("192.168.1.196", 1028));
+                ByteBuffer byteBuffer = ByteBuffer.allocate(2048);
+                //发送断掉的链路以及topo信息
+                JsonObject sendInfo = new JsonObject();
+                JsonArray jsonArray = new JsonArray();
+                jsonArray.add(0);
+                jsonArray.add(1);
+                jsonArray.add(1);
+                jsonArray.add(0);
+                sendInfo.set("disconnectEdge", jsonArray);
+                try {
+                    JsonNode jsonNode = new ObjectMapper().readTree(topoIdx.substring(0, topoIdx.length() - 1));
+                    JsonNode topoid = jsonNode.get("topo_idx");
+                    sendInfo.set("topo_idx", topoid.intValue());
+                } catch (JsonProcessingException e) {
+                    e.printStackTrace();
+                }
+                String s = sendInfo.toString() + "*";
+                byteBuffer.put(s.getBytes());
+                byteBuffer.flip();
+                socketChannel.write(byteBuffer);
+                while (byteBuffer.hasRemaining()) {
+                    socketChannel.write(byteBuffer);
+                }
+                byteBuffer.clear();
+
+                //接收数据
+                int len = 0;
+                StringBuilder stringBuilder = new StringBuilder();
+                while ((len = socketChannel.read(byteBuffer)) >= 0)  {
+                    byteBuffer.flip();
+                    String res = new String(byteBuffer.array(), 0, len);
+                    byteBuffer.clear();
+                    stringBuilder.append(res);
+                }
+                routingClq.offer(stringBuilder.toString());
+                socketChannel.close();
+
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+
+        }
+    }
 /**
  * 接收topo的id信息.
  */
@@ -1414,7 +1555,7 @@ public class TopoIdxThread implements Runnable {
                             stringBuilder.append(res);
                         }
                         //清空优化路由
-                        emptyOptiFlow();
+//                        emptyOptiFlow();
                         // 接收topo信息
                         topoIdx = stringBuilder.toString() + "*";
                         log.info("=========" + topoIdx + "==========");
@@ -1426,13 +1567,14 @@ public class TopoIdxThread implements Runnable {
                         waitTopoDiscover();
                         //重新设置switch间的端口信息
                         setPortInfo();
-                        try {
+                     /*   try {
                             Thread.sleep(10000);
                         } catch (InterruptedException e) {
                             e.printStackTrace();
-                        }
+                        }*/
+//                        DisConnectionMission(65);
                         //请求优化路由
-                        optiRouterMission(70, 1);
+                        optiRouterMission(15, 60, 0);
                         channel.close();
                     }
                 }
